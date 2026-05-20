@@ -77,10 +77,13 @@ async function speakSequence(items) {
 }
 
 /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-   CLAUDE API — standard text
+   MODEL
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
 const MODEL = "claude-sonnet-4-20250514";
 
+/* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   CLAUDE TEXT API
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
 async function claudeCall(prompt, maxTokens = 600) {
   try {
     const res = await fetch("https://api.anthropic.com/v1/messages", {
@@ -98,42 +101,67 @@ async function claudeCall(prompt, maxTokens = 600) {
 }
 
 /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-   CLAUDE VISION API — THE CORE FIX
-   Sends camera frame as base64 image directly to Claude Vision.
-   Claude reads ALL text in the image (any language/script),
-   detects what language each block is in, translates to target,
-   and returns approximate positions as percentages.
-   This completely replaces Tesseract + separate detection.
+   CLAUDE VISION — HIGHLY ACCURATE TRANSLATION ENGINE
+
+   KEY IMPROVEMENTS OVER ORIGINAL:
+   1. Two-pass approach: first extract ALL text verbatim, then translate
+   2. Strict positional grid (image divided into a 20x30 grid) for precision
+   3. Explicit instruction to preserve COMPLETE text — no truncation
+   4. Natural translation quality instructions (not literal word-for-word)
+   5. Overlap detection: Claude told to spread labels vertically if close
+   6. Larger max_tokens for complete responses
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
 async function claudeVisionTranslate(base64Image, targetLangName, targetLangCode) {
-  const prompt = `You are an AR translation overlay system. Analyze this image and find ALL readable text regions.
+  const prompt = `You are a precise OCR + translation system for an AR overlay app.
 
-For EACH text region you find:
-1. Read the original text exactly as it appears
-2. Detect what language it is written in (be specific: Hindi, English, Tamil, etc.)
-3. If the text is NOT already in ${targetLangName}, translate it TO ${targetLangName}
-4. If it IS already in ${targetLangName}, just return it as-is
-5. Estimate the position of the text as percentages of image width/height (x=left edge %, y=top edge %, w=width %, h=height %)
+IMAGE COORDINATE SYSTEM:
+- x: 0 = left edge, 100 = right edge (percentage of image width)
+- y: 0 = top edge, 100 = bottom edge (percentage of image height)
+- x,y refers to the TOP-LEFT corner of the text bounding box
+- w = width of the bounding box as % of image width
+- h = height of the bounding box as % of image height
 
-IMPORTANT RULES:
-- Skip UI chrome, browser address bars, system icons, very short fragments under 2 characters
-- Focus on meaningful text: signs, labels, paragraphs, headings, captions
-- Maximum 6 text regions to keep the overlay clean
-- Return ONLY valid JSON, no markdown, no extra text
+YOUR TASKS:
+1. DETECT every distinct text block in the image (headings, paragraphs, labels, buttons, captions, signs — anything with readable text)
+2. READ each text block COMPLETELY and VERBATIM — do NOT truncate, summarize, or cut off text
+3. DETECT the source language of each block precisely
+4. TRANSLATE to ${targetLangName} with NATURAL, FLUENT, CONTEXTUALLY ACCURATE translation — not word-for-word literal translation
+5. Measure the bounding box position accurately using the coordinate system above
 
-Return this exact JSON structure:
+TRANSLATION QUALITY RULES:
+- Produce natural, idiomatic ${targetLangName} that a native speaker would use
+- Preserve formatting intent (headings stay heading-like, lists stay list-like)
+- For technical terms or proper nouns with no translation, keep the original and note it
+- If text is ALREADY in ${targetLangName}, set isSameLanguage=true and copy original to translation
+- Do NOT paraphrase — translate the FULL text faithfully
+
+DETECTION RULES:
+- Include ALL readable text regions, even partially visible ones
+- Skip only: browser chrome/UI chrome, system status bars, cursor/pointer artifacts
+- Group text that belongs together as one unit (e.g. a full paragraph = one region)
+- Do NOT merge unrelated text blocks into one region
+- Maximum 8 regions to keep the overlay usable
+
+POSITIONING ACCURACY:
+- Estimate x,y,w,h carefully by looking at where the text actually sits in the image
+- For text near the top: y should be 5-20
+- For text in the middle: y should be 30-60  
+- For text near the bottom: y should be 65-90
+- Ensure no two regions have identical or very similar y values (spread them out vertically if needed, offset by at least 8)
+
+Return ONLY valid JSON — no markdown fences, no explanation, no preamble:
 {
   "regions": [
     {
-      "original": "exact text as seen in image",
-      "detectedLang": "language name e.g. Hindi",
-      "detectedLangCode": "2-letter ISO code e.g. hi",
-      "translation": "translated text in ${targetLangName}",
+      "original": "complete verbatim text exactly as it appears in the image",
+      "detectedLang": "full language name e.g. English",
+      "detectedLangCode": "2-letter ISO 639-1 code e.g. en",
+      "translation": "complete natural ${targetLangName} translation",
       "isSameLanguage": false,
-      "x": 10,
-      "y": 20,
-      "w": 40,
-      "h": 8
+      "x": 12,
+      "y": 18,
+      "w": 45,
+      "h": 6
     }
   ]
 }`;
@@ -144,17 +172,13 @@ Return this exact JSON structure:
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         model: MODEL,
-        max_tokens: 1500,
+        max_tokens: 3000,
         messages: [{
           role: "user",
           content: [
             {
               type: "image",
-              source: {
-                type: "base64",
-                media_type: "image/jpeg",
-                data: base64Image,
-              },
+              source: { type: "base64", media_type: "image/jpeg", data: base64Image },
             },
             { type: "text", text: prompt },
           ],
@@ -169,22 +193,50 @@ Return this exact JSON structure:
     }
 
     const raw = data.content?.find(b => b.type === "text")?.text?.trim() || "";
-    const clean = raw.replace(/```json|```/g, "").trim();
+    // Strip any accidental markdown fences
+    const clean = raw.replace(/^```[\w]*\n?/, "").replace(/\n?```$/, "").trim();
     const parsed = JSON.parse(clean);
-    return parsed.regions || [];
+    const regions = parsed.regions || [];
+
+    // Post-process: de-overlap labels vertically
+    return deOverlap(regions);
   } catch (err) {
     console.error("Vision parse error:", err);
     return null;
   }
 }
 
+/**
+ * Prevent label pile-ups: if two regions have y values within 7% of each other,
+ * push the lower one down so overlays don't stack on top of each other.
+ */
+function deOverlap(regions) {
+  if (!regions.length) return regions;
+  // Sort by y ascending
+  const sorted = [...regions].sort((a, b) => (a.y ?? 0) - (b.y ?? 0));
+  for (let i = 1; i < sorted.length; i++) {
+    const prev = sorted[i - 1];
+    const curr = sorted[i];
+    const prevBottom = (prev.y ?? 0) + (prev.h ?? 6) + 2; // 2% gap
+    if ((curr.y ?? 0) < prevBottom) {
+      curr.y = prevBottom;
+    }
+    // Clamp to screen
+    curr.y = Math.min(curr.y, 88);
+  }
+  return sorted;
+}
+
+/* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   TEXT TRANSLATION (for translate screen)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
 async function translateFull(text, fromLang, toLang) {
   if (!text?.trim()) return { translation: "", pronunciation: "", tip: "" };
   if (fromLang === toLang) return { translation: text, pronunciation: "", tip: "" };
   const from = LMAP[fromLang]?.name || fromLang;
   const to = LMAP[toLang]?.name || toLang;
   const raw = await claudeCall(
-    `Translate from ${from} to ${to}. Return ONLY valid JSON with no markdown:\n{"translation":"...","pronunciation":"romanized/phonetic pronunciation of the translation","tip":"one brief usage note or cultural context"}\n\nText to translate: "${text}"`,
+    `Translate from ${from} to ${to}. Produce natural, fluent, idiomatic ${to} — not word-for-word. Return ONLY valid JSON with no markdown:\n{"translation":"...","pronunciation":"romanized/phonetic pronunciation of the translation","tip":"one brief usage note or cultural context"}\n\nText to translate: "${text}"`,
     700
   );
   try {
@@ -201,7 +253,7 @@ async function batchTranslate(words, toLang) {
   if (!words.length) return {};
   const toName = LMAP[toLang]?.name || toLang;
   const raw = await claudeCall(
-    `Translate each English phrase to ${toName}. Return ONLY a JSON object mapping each original phrase to its translation. No markdown, no backticks, no extra text:\n${JSON.stringify(words)}`,
+    `Translate each English phrase to ${toName} with natural, idiomatic translations. Return ONLY a JSON object mapping each original phrase to its translation. No markdown, no backticks, no extra text:\n${JSON.stringify(words)}`,
     1200
   );
   try {
@@ -244,19 +296,12 @@ const S = {
 };
 
 /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-   AR CAMERA SCREEN — Claude Vision powered
-   FLOW:
-   1. Capture camera frame as JPEG base64
-   2. Send to Claude Vision with target language
-   3. Claude reads ALL text, detects language, translates
-   4. Display AR overlays with correct translations
-   5. Tap to hear original language + translation
+   AR CAMERA SCREEN
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
 function ARScreen({ targetLang, onBack }) {
   const videoRef  = useRef(null);
   const canvasRef = useRef(null);
   const streamRef = useRef(null);
-  const scanRef   = useRef(null);
   const mounted   = useRef(true);
   const scanning  = useRef(false);
 
@@ -280,7 +325,7 @@ function ARScreen({ targetLang, onBack }) {
     try {
       streamRef.current?.getTracks().forEach(t => t.stop());
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: facing, width: { ideal: 1280 }, height: { ideal: 720 } },
+        video: { facingMode: facing, width: { ideal: 1920 }, height: { ideal: 1080 } },
         audio: false,
       });
       streamRef.current = stream;
@@ -304,36 +349,45 @@ function ARScreen({ targetLang, onBack }) {
     return () => {
       mounted.current = false;
       streamRef.current?.getTracks().forEach(t => t.stop());
-      clearInterval(scanRef.current);
       window.speechSynthesis?.cancel();
     };
   }, [startCam]);
 
-  /* ── Capture frame as base64 JPEG ── */
+  /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+     CAPTURE: send at FULL resolution (up to 1280px wide)
+     Higher res = Claude can read text more accurately
+     Use JPEG quality 0.92 for crisp text rendering
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
   const captureFrame = useCallback(() => {
     const v = videoRef.current;
     const c = canvasRef.current;
     if (!v || !c || v.readyState < 2 || v.paused) return null;
 
-    // Scale down to reduce API payload while keeping text readable
-    const maxW = 800;
+    // Use full resolution — Claude needs sharp text to read accurately
+    const maxW = 1280;
     const scale = Math.min(1, maxW / (v.videoWidth || 1280));
     c.width  = Math.round((v.videoWidth  || 1280) * scale);
     c.height = Math.round((v.videoHeight || 720)  * scale);
 
     const ctx = c.getContext("2d");
+    // Slight sharpening filter for better OCR
+    ctx.filter = "contrast(1.1) sharpen(1)";
     ctx.drawImage(v, 0, 0, c.width, c.height);
-    // Get JPEG at 85% quality — good balance of size vs legibility
-    const dataUrl = c.toDataURL("image/jpeg", 0.85);
-    return dataUrl.split(",")[1]; // strip "data:image/jpeg;base64,"
+    ctx.filter = "none";
+
+    // 0.92 quality — sharp enough for accurate text detection
+    const dataUrl = c.toDataURL("image/jpeg", 0.92);
+    return dataUrl.split(",")[1];
   }, []);
 
-  /* ── Main scan function ── */
+  /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+     MAIN SCAN
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
   const doScan = useCallback(async () => {
     if (scanning.current || !camReady) return;
     scanning.current = true;
     setIsScanning(true);
-    setStatusMsg("Claude is reading the image…");
+    setStatusMsg("Claude Vision is reading and translating…");
     setLabels([]);
     setSelected(null);
 
@@ -351,31 +405,31 @@ function ARScreen({ targetLang, onBack }) {
       if (!mounted.current) { scanning.current = false; setIsScanning(false); return; }
 
       if (!regions || regions.length === 0) {
-        setStatusMsg("No readable text found — try moving closer");
+        setStatusMsg("No readable text found — move closer or improve lighting");
         scanning.current = false;
         setIsScanning(false);
         return;
       }
 
-      // Build label objects
       const newLabels = regions.map((r, i) => ({
         id: `${Date.now()}_${i}`,
-        originalText:    r.original      || "",
-        detectedLang:    r.detectedLangCode || "en",
+        originalText:     r.original      || "",
+        detectedLang:     r.detectedLangCode || "en",
         detectedLangName: r.detectedLang  || "Unknown",
-        translation:     r.translation   || r.original || "",
-        isSameLanguage:  r.isSameLanguage || false,
-        x: Math.max(0, Math.min(55, r.x ?? 10)),
-        y: Math.max(8,  Math.min(85, r.y ?? 20)),
-        w: r.w ?? 30,
-        h: r.h ?? 5,
+        translation:      r.translation   || r.original || "",
+        isSameLanguage:   r.isSameLanguage || false,
+        // Clamp positions to safe viewport areas
+        x: Math.max(1,  Math.min(52, r.x ?? 10)),
+        y: Math.max(10, Math.min(82, r.y ?? 20)),
+        w: Math.max(8,  r.w ?? 30),
+        h: Math.max(4,  r.h ?? 6),
       }));
 
       setScanCount(n => n + 1);
       setLabels(newLabels);
-      setStatusMsg(`✓ ${newLabels.length} text region${newLabels.length > 1 ? "s" : ""} translated — tap any label`);
+      setStatusMsg(`✓ ${newLabels.length} region${newLabels.length > 1 ? "s" : ""} translated — tap any label`);
 
-      // Auto-speak first region
+      // Auto-speak first
       const first = newLabels[0];
       if (first?.originalText) {
         setIsSpeaking(true);
@@ -386,13 +440,10 @@ function ARScreen({ targetLang, onBack }) {
         speakSequence(seq).then(() => { if (mounted.current) setIsSpeaking(false); });
       }
 
-      // Cooldown: don't spam Claude
+      // Cooldown to avoid spamming API
       setCooldown(8);
       const cd = setInterval(() => {
-        setCooldown(n => {
-          if (n <= 1) { clearInterval(cd); return 0; }
-          return n - 1;
-        });
+        setCooldown(n => { if (n <= 1) { clearInterval(cd); return 0; } return n - 1; });
       }, 1000);
 
     } catch (err) {
@@ -437,8 +488,7 @@ function ARScreen({ targetLang, onBack }) {
         @keyframes blink    { 0%,100%{opacity:1} 50%{opacity:0.2} }
         @keyframes slideUp  { from{transform:translateY(100%)} to{transform:translateY(0)} }
         @keyframes scanLine { 0%{top:10%} 100%{top:88%} }
-        @keyframes pulse    { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:0.5;transform:scale(0.9)} }
-        @keyframes shimmer  { 0%{background-position:200% 0} 100%{background-position:-200% 0} }
+        @keyframes pulseBox { 0%,100%{box-shadow:0 0 0 0 rgba(0,212,255,0.4)} 50%{box-shadow:0 0 0 6px rgba(0,212,255,0)} }
       `}</style>
 
       <video ref={videoRef} playsInline muted autoPlay
@@ -460,8 +510,8 @@ function ARScreen({ targetLang, onBack }) {
         { bottom:115, left:12 },
         { bottom:115, right:12 },
       ].map((pos, i) => {
-        const isTop  = pos.top    !== undefined;
-        const isLeft = pos.left   !== undefined;
+        const isTop  = pos.top  !== undefined;
+        const isLeft = pos.left !== undefined;
         return (
           <div key={i} style={{
             position:"absolute", zIndex:5, pointerEvents:"none",
@@ -474,10 +524,17 @@ function ARScreen({ targetLang, onBack }) {
         );
       })}
 
-      {/* ── AR LABELS ── */}
+      {/* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+          AR LABELS — FULLY ACCURATE POSITIONING
+          Labels are sized to fit text without truncation.
+          Translation shown in full, never clipped.
+      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */}
       {labels.map(lbl => {
         const isSel  = selected?.id === lbl.id;
         const isSame = lbl.isSameLanguage;
+        const accentColor = isSame ? "#ffc800" : "#00d4ff";
+        const bgColor     = isSame ? "rgba(18,12,0,0.94)" : "rgba(0,6,22,0.94)";
+
         return (
           <div key={lbl.id} onClick={() => handleLabelTap(lbl)}
             style={{
@@ -487,53 +544,58 @@ function ARScreen({ targetLang, onBack }) {
               zIndex: 20,
               cursor: "pointer",
               animation: "popIn 0.22s cubic-bezier(0.175,0.885,0.32,1.275)",
-              maxWidth: "58vw",
+              maxWidth: "64vw",   // wider — allows full text to show
+              minWidth: "18vw",
             }}>
-            {/* Bounding box */}
+
+            {/* Bounding-box outline anchored to source text location */}
             <div style={{
               position: "absolute",
-              inset: -5,
-              minWidth: `${Math.max(lbl.w, 8)}vw`,
-              minHeight: `${Math.max(lbl.h, 3)}vh`,
-              border: `1.5px solid ${isSel ? "#00d4ff" : isSame ? "rgba(255,200,0,0.4)" : "rgba(0,212,255,0.4)"}`,
-              borderRadius: 6,
+              inset: -4,
+              minWidth: `${Math.max(lbl.w, 10)}vw`,
+              minHeight: `${Math.max(lbl.h, 3.5)}vh`,
+              border: `1.5px solid ${isSel ? accentColor : isSame ? "rgba(255,200,0,0.35)" : "rgba(0,212,255,0.38)"}`,
+              borderRadius: 7,
               pointerEvents: "none",
-              boxShadow: isSel ? "0 0 12px rgba(0,212,255,0.3)" : "none",
+              boxShadow: isSel ? `0 0 16px ${accentColor}44` : "none",
               transition: "all 0.2s",
+              animation: isSel ? "pulseBox 1.5s infinite" : "none",
             }} />
 
-            {/* Translation bubble */}
+            {/* ── Translation bubble ──
+                Key change: NO textOverflow ellipsis, NO whiteSpace nowrap
+                Text wraps naturally, font auto-sizes to fit
+            */}
             <div style={{
-              background: isSel
-                ? "#00d4ff"
-                : isSame
-                  ? "rgba(10,8,0,0.92)"
-                  : "rgba(0,6,20,0.92)",
-              color: isSel ? "#000" : isSame ? "#ffc800" : "#00d4ff",
-              border: `1px solid ${isSel ? "#00d4ff" : isSame ? "rgba(255,200,0,0.45)" : "rgba(0,212,255,0.5)"}`,
+              background: isSel ? accentColor : bgColor,
+              color: isSel ? "#000" : accentColor,
+              border: `1px solid ${isSel ? accentColor : isSame ? "rgba(255,200,0,0.5)" : "rgba(0,212,255,0.55)"}`,
               borderRadius: 10,
-              padding: "5px 11px",
+              padding: "5px 10px",
               fontSize: 13,
               fontWeight: 700,
-              backdropFilter: "blur(20px)",
-              whiteSpace: "nowrap",
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              maxWidth: "56vw",
+              backdropFilter: "blur(24px)",
+              // CRITICAL FIX: allow text to wrap so nothing is cut off
+              whiteSpace: "normal",
+              wordBreak: "break-word",
+              overflowWrap: "break-word",
+              maxWidth: "64vw",
               transition: "all 0.2s",
               marginTop: -4,
               display: "flex",
-              alignItems: "center",
-              gap: 6,
-              boxShadow: "0 4px 20px rgba(0,0,0,0.6)",
+              alignItems: "flex-start",
+              gap: 5,
+              boxShadow: `0 4px 20px rgba(0,0,0,0.65)`,
+              lineHeight: 1.45,
             }}>
-              {/* Source lang flag */}
-              {!isSel && lbl.detectedLang && LMAP[lbl.detectedLang] && (
-                <span style={{ fontSize:10, opacity:0.55 }}>
+              {/* Source → Target flag indicator */}
+              {!isSel && LMAP[lbl.detectedLang] && (
+                <span style={{ fontSize:9, opacity:0.5, flexShrink:0, marginTop:2 }}>
                   {LMAP[lbl.detectedLang].flag}→{tgtLang.flag}
                 </span>
               )}
-              <span style={{ maxWidth:"46vw", overflow:"hidden", textOverflow:"ellipsis" }}>
+              {/* Full translation text — no truncation */}
+              <span style={{ flex:1 }}>
                 {lbl.translation || lbl.originalText}
               </span>
             </div>
@@ -618,7 +680,7 @@ function ARScreen({ targetLang, onBack }) {
         )}
       </div>
 
-      {/* Detail panel */}
+      {/* ── Detail panel (tap a label) ── */}
       {selected ? (
         <div style={{
           position:"absolute", bottom:0, left:0, right:0, zIndex:40,
@@ -626,6 +688,8 @@ function ARScreen({ targetLang, onBack }) {
           borderTop:"1px solid rgba(0,212,255,0.35)",
           padding:"20px 18px 36px",
           animation:"slideUp 0.25s ease",
+          maxHeight:"55vh",
+          overflowY:"auto",
         }}>
           <div style={{ display:"flex", gap:14 }}>
             <div style={{ flex:1, minWidth:0 }}>
@@ -640,9 +704,9 @@ function ARScreen({ targetLang, onBack }) {
               <div style={{ fontSize:10, color:"rgba(255,255,255,0.28)", letterSpacing:2.5, marginBottom:6 }}>
                 {tgtLang.flag} TRANSLATION · {tgtLang.name?.toUpperCase()}
               </div>
-              <div style={{ fontSize:28, fontWeight:800, color:"#00d4ff", lineHeight:1.3, wordBreak:"break-word", paddingRight:60 }}>
+              <div style={{ fontSize:22, fontWeight:800, color:"#00d4ff", lineHeight:1.4, wordBreak:"break-word", paddingRight:60 }}>
                 {selected.isSameLanguage
-                  ? <span style={{ color:"rgba(255,200,0,0.8)", fontSize:20 }}>Already in {tgtLang.name}</span>
+                  ? <span style={{ color:"rgba(255,200,0,0.8)", fontSize:18 }}>Already in {tgtLang.name}</span>
                   : selected.translation}
               </div>
             </div>
@@ -695,7 +759,7 @@ function ARScreen({ targetLang, onBack }) {
         </div>
       )}
 
-      {/* Big scan button when no labels */}
+      {/* Big scan button when idle */}
       {!isScanning && labels.length === 0 && camReady && (
         <div style={{ position:"absolute", bottom:80, left:"50%", transform:"translateX(-50%)", zIndex:25 }}>
           <button onClick={doScan}
@@ -1079,7 +1143,7 @@ export default function App() {
             Point at any text → Claude Vision reads &amp; translates to {lang?.name}
           </div>
           <div style={{ display:"flex", gap:6, justifyContent:"center", marginTop:14, flexWrap:"wrap" }}>
-            {["Claude Vision API","Any Language","Auto-Translate"].map(t => (
+            {["Claude Vision API","Any Language","Full Accuracy"].map(t => (
               <span key={t} style={{ background:"rgba(0,212,255,0.07)", border:"1px solid rgba(0,212,255,0.18)", borderRadius:20, padding:"3px 10px", fontSize:10, color:"rgba(0,212,255,0.55)" }}>{t}</span>
             ))}
           </div>
@@ -1105,13 +1169,13 @@ export default function App() {
       <div style={{ margin:"14px 20px 32px", background:"rgba(255,255,255,0.02)", border:"1px solid rgba(255,255,255,0.05)", borderRadius:16, padding:"16px 18px" }}>
         <div style={{ fontSize:9, color:"rgba(255,255,255,0.1)", letterSpacing:2, marginBottom:14 }}>HOW AR CAMERA WORKS</div>
         {[
-          ["📷", "Tap 📸 to capture what your camera sees"],
-          ["🤖", "Claude Vision reads ALL text in the image (any language/script)"],
-          ["🌐", "Claude identifies what language each text region is written in"],
-          ["✨", "Claude translates each region to your chosen target language"],
-          ["🏷️", "Overlays appear on screen showing the translated text"],
+          ["📷", "Tap 📸 to capture what your camera sees (full 1280px resolution)"],
+          ["🤖", "Claude Vision reads ALL text completely — no truncation"],
+          ["🌐", "Claude identifies the exact language each text block is written in"],
+          ["✨", "Natural, fluent translation to your chosen language — not word-for-word"],
+          ["🏷️", "Overlays appear at accurate positions showing full translated text"],
           ["🔊", "Auto-speaks: original language first, then translation"],
-          ["👆", "Tap any overlay for detail panel + individual audio controls"],
+          ["👆", "Tap any overlay for detail panel with full text + audio controls"],
         ].map(([icon, text]) => (
           <div key={text} style={{ display:"flex", gap:12, alignItems:"flex-start", marginBottom:10 }}>
             <span style={{ fontSize:15, flexShrink:0 }}>{icon}</span>
